@@ -3,12 +3,19 @@ Architecture can be found in Presentation folder
 
 # Notejam application stack
 Provision: CloudFormation
+
 CI/CD: CodePipeline/CloudBuild with CodeCommit integration
+
 App: Elastic Beanstalk
+
 Database: RDS (mysql)
+
 Monitoring: Cloudwatch
+
 Logs: Cloudwatch for app logs as well as S3.
+
 Lambda functions is being used to get and generate passwords for RDS master account.
+
 
 # Prereqs:
 Create an S3 bucket and place the lambda functions "generate-password-lambda.zip" and "get-password-lambda.zip"located in presentation/lambdafunctions folder, please note that the format should be .zip.
