@@ -1,4 +1,5 @@
 # NoteJam-migration-on-ElasticBeanstalk
+Architecture can be found in Presentation folder
 
 # Notejam application stack
 Provision: CloudFormation
@@ -14,6 +15,5 @@ Create an S3 bucket and place the lambda functions "generate-password-lambda.zip
 In the AWS account which the stack will be executed, create an repository in CodeCommit and push all the files in this repository except the presentation folder.
 
 # Execution:
-Execute the notejam-cf-stack.yml template from CloudFormation located in presentation/cloudformation folder. Please note that you also need to specify all parameters when deploying such as lambda functions bucketname etc.
+Execute the notejam-cf-stack.yml template from CloudFormation located in presentation folder. Please note that you also need to specify all parameters when deploying such as lambda functions bucketname etc.
 
-Information, improvements and architecture can be found in the presentation folder in this repo.
