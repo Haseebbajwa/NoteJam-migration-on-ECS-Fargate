@@ -1,0 +1,860 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: 'NoteJam CF template'
+Parameters:
+  LambdaFunctionsBucket:
+    Description: Bucket where you have placed the lambda functions for RDS password gen/get
+    Type: String
+  notejambucket:
+    Description: NoteJam bucket to store artifacts
+    Type: String
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+  NoteJamRepoName:
+    Description: NoteJam repo name
+    Type: String
+    Default: django
+    AllowedPattern: '[A-Za-z0-9-]+'
+  NoteJamRepoBranchName:
+    Description: NoteJam repo master branch name
+    Type: String
+    Default: master
+    AllowedPattern: '[A-Za-z0-9-]+'
+  DBInstanceClass:
+    Description: The name of the compute and memory capacity classes of the DB instance.
+    Type: String
+    Default: db.t2.micro  
+  DBName:
+    Description: The name of the database inside the instance.
+    Type: String
+    Default: notejamdb
+  SSMParameterName:
+    Default: RDS_PASSWORD
+    Description: Parameter name under which to store the master password for the RDS
+      instace.
+    Type: String
+  IAMRoleName:
+    Default: RDS-Template-LambdaExecutionRole
+    Description: Name of the IAM Role that should be used when creating the IAM Role
+      that Lambda functions will be assuming
+    Type: String
+  IAMManagedPolicyName:
+    Default: iam-policy-ssm-rds
+    Description: Name of the IAM policy that will be created that allows users to
+      decrypt SSM RDS Master password parameter.
+    Type: String
+Resources:
+  EncryptionKey:
+    Properties:
+      Description: KMS Key to encrypt SSM Parameter that include RDS master passwords.
+      Enabled: true
+      KeyPolicy:
+        Id: key-default-1
+        Statement:
+        - Action:
+          - kms:*
+          Effect: Allow
+          Principal:
+            AWS:
+              Fn::Join:
+              - ':'
+              - - 'arn:aws:iam:'
+                - Ref: AWS::AccountId
+                - root
+          Resource: '*'
+          Sid: Enable IAM User Permissions
+        Version: '2012-10-17'
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub:
+          - ${AWS::StackName}-${Name}
+          - Name: SSM-KMS-KEY
+    Type: AWS::KMS::Key
+  EncryptionKeyAlias:
+    Properties:
+      AliasName: alias/RDSMasterKey
+      TargetKeyId:
+        Ref: EncryptionKey
+    Type: AWS::KMS::Alias
+  GeneratePasswordLambda:
+    DependsOn: SSMParameter
+    Properties:
+      CodeUri:
+        Bucket:
+          Ref: LambdaFunctionsBucket
+        Key: "generate-password-lambda.zip"
+      Description: Lambda Function that will generate random passwords
+      FunctionName: GeneratePasswordLambda
+      Handler: generate-password-lambda.handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+      Runtime: python3.6
+      Timeout: 65
+    Type: AWS::Serverless::Function
+  GetPasswordLambda:
+    Properties:
+      CodeUri:
+        Bucket:
+          Ref: LambdaFunctionsBucket
+        Key: "get-password-lambda.zip"
+      Description: Lambda Function that will retrieve password from encrypted SSM
+        parameter.
+      FunctionName: GetPasswordLambda
+      Handler: get-password-lambda.handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+      Runtime: python3.6
+      Timeout: 10
+    Type: AWS::Serverless::Function
+  InvokeGeneratePasswordLambda:
+    DeletionPolicy: Retain
+    DependsOn: EncryptionKey
+    Properties:
+      KeyID:
+        Ref: EncryptionKey
+      ParameterName:
+        Ref: SSMParameterName
+      ServiceToken:
+        Fn::GetAtt:
+        - GeneratePasswordLambda
+        - Arn
+    Type: AWS::CloudFormation::CustomResource
+    Version: '1.0'
+  InvokeGetPasswordLambda:
+    DeletionPolicy: Retain
+    DependsOn: InvokeGeneratePasswordLambda
+    Properties:
+      ParameterName:
+        Ref: SSMParameterName
+      ServiceToken:
+        Fn::GetAtt:
+        - GetPasswordLambda
+        - Arn
+    Type: AWS::CloudFormation::CustomResource
+    Version: '1.0'
+  LambdaExecutionRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Path: /
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - ssm:GetParameters
+            - ssm:GetParameter
+            - ssm:PutParameter
+            Effect: Allow
+            Resource:
+              Fn::Join:
+              - ':'
+              - - arn:aws:ssm
+                - Ref: AWS::Region
+                - Ref: AWS::AccountId
+                - Fn::Sub: parameter/${SSMParameterName}
+          Version: '2012-10-17'
+        PolicyName: SSM-Master-Password-Parameter-Access
+      RoleName:
+        Ref: IAMRoleName
+    Type: AWS::IAM::Role
+  RDSMasterKeyUsagePolicy:
+    Properties:
+      ManagedPolicyName:
+        Ref: IAMManagedPolicyName
+      PolicyDocument:
+        Statement:
+        - Action:
+          - kms:Encrypt
+          - kms:Decrypt
+          - kms:ReEncrypt*
+          - kms:GenerateDataKey*
+          - kms:DescribeKey
+          Effect: Allow
+          Resource:
+            Fn::GetAtt:
+            - EncryptionKey
+            - Arn
+          Sid: AllowUseOfKey
+        Version: '2012-10-17'
+      Roles:
+      - Ref: LambdaExecutionRole
+    Type: AWS::IAM::ManagedPolicy
+  SSMParameter:
+    Properties:
+      Description: String
+      Name:
+        Ref: SSMParameterName
+      Type: String
+      Value: TempValue
+    Type: AWS::SSM::Parameter
+  VPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: 150.16.5.0/22
+      InstanceTenancy: default
+      EnableDnsSupport: true
+      EnableDnsHostnames: false
+      Tags:
+        -
+          Key: Name
+          Value: noteJamVPC
+  subnetDb2b:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      CidrBlock: 150.16.7.32/27
+      AvailabilityZone: eu-west-1b
+      VpcId:
+        Ref: VPC
+      Tags:
+        -
+          Key: Name
+          Value: noteJam-DB-2B
+  subnetDb2a:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      CidrBlock: 150.16.7.0/27
+      AvailabilityZone: eu-west-1a
+      VpcId:
+        Ref: VPC
+      Tags:
+        -
+          Key: Name
+          Value: noteJam-DB-2A
+  subnetElb2b:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      CidrBlock: 150.16.6.32/27
+      AvailabilityZone: eu-west-1b
+      VpcId:
+        Ref: VPC
+      Tags:
+        -
+          Key: Name
+          Value: noteJam-ELB-2B
+  subnetElb2a:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      CidrBlock: 150.16.6.0/27
+      AvailabilityZone: eu-west-1a
+      VpcId:
+        Ref: VPC
+      Tags:
+        -
+          Key: Name
+          Value: noteJam-ELB-2A
+  subnetApp2b:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      CidrBlock: 150.16.5.32/27
+      AvailabilityZone: eu-west-1b
+      VpcId:
+        Ref: VPC
+      Tags:
+        -
+          Key: Name
+          Value: noteJam-APP-2B
+  subnetApp2a:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      CidrBlock: 150.16.5.0/27
+      AvailabilityZone: eu-west-1a
+      VpcId:
+        Ref: VPC
+      Tags:
+        -
+          Key: Name
+          Value: noteJam-APP-2A
+  noteJamRDS:
+    DependsOn: InvokeGeneratePasswordLambda
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      AllocatedStorage: '5'
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: true
+      MultiAZ: true
+      DBInstanceClass: !Ref DBInstanceClass
+      Port: '3306'
+      StorageType: standard
+      BackupRetentionPeriod: 5
+      MasterUsername: secretsauce
+      MasterUserPassword:
+          Fn::GetAtt:
+          - InvokeGetPasswordLambda
+          - Data
+      PreferredBackupWindow: '22:08-22:38'
+      PreferredMaintenanceWindow: 'wed:22:50-wed:23:50'
+      DBName: !Ref DBName
+      Engine: mysql
+      EngineVersion: 5.7.26
+      LicenseModel: general-public-license
+      DBSubnetGroupName:
+        Ref: notejamDbSubnetGroup
+      DBParameterGroupName:
+        Ref: DBPrefnoteJam
+      VPCSecurityGroups:
+        -
+          Ref: SGnoteJamDb
+      Tags:
+        -
+          Key: workload-type
+          Value: other
+  notejamDbSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupDescription: 'SUBG - noteJamDb '
+      SubnetIds:
+        -
+          Ref: subnetDb2b
+        -
+          Ref: subnetDb2a
+  DBPrefnoteJam:
+    Type: 'AWS::RDS::DBParameterGroup'
+    Properties:
+      Description: 'noteJam Mysql parameter Group'
+      Family: mysql5.7
+      Parameters:
+        binlog_cache_size: '32768'
+        binlog_format: MIXED
+        explicit_defaults_for_timestamp: '1'
+        innodb_buffer_pool_size: '{DBInstanceClassMemory*3/4}'
+        innodb_file_per_table: '1'
+        innodb_flush_method: O_DIRECT
+  SGnoteJamDb:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: SG-noteJam-DB
+      VpcId:
+        Ref: VPC
+      Tags:
+        -
+          Key: Name
+          Value: SG-DB-1
+  SGDBIngress:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId:
+        Ref: SGnoteJamDb
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId:
+        Ref: SGnoteJamApp
+  SGELBIngressHTTP:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId:
+        Ref: SGnoteJamElb
+      CidrIp: 0.0.0.0/0
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+  SGELBIngressHTTPS:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId:
+        Ref: SGnoteJamElb
+      CidrIp: 0.0.0.0/0
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+  SGAPPIngressHTTP:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId:
+        Ref: SGnoteJamApp
+      SourceSecurityGroupId:
+        Ref: SGnoteJamElb
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+  SGAPPIngressHTTPS:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId:
+        Ref: SGnoteJamApp
+      SourceSecurityGroupId:
+        Ref: SGnoteJamElb
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+  SGDBEgress:
+    Type: 'AWS::EC2::SecurityGroupEgress'
+    Properties:
+      GroupId:
+        Ref: SGnoteJamDb
+      IpProtocol: '-1'
+      CidrIp: 0.0.0.0/0
+  SGELBEgress:
+    Type: 'AWS::EC2::SecurityGroupEgress'
+    Properties:
+      GroupId:
+        Ref: SGnoteJamElb
+      IpProtocol: '-1'
+      CidrIp: 0.0.0.0/0
+  SGAPPEgress:
+    Type: 'AWS::EC2::SecurityGroupEgress'
+    Properties:
+      GroupId:
+        Ref: SGnoteJamApp
+      IpProtocol: '-1'
+      CidrIp: 0.0.0.0/0
+  EC2RT1:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId:
+        Ref: VPC
+  EC2RTAS1:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId:
+        Ref: EC2RT1
+      SubnetId:
+        Ref: subnetElb2b
+  EC2IGW1:
+    Type: 'AWS::EC2::InternetGateway'
+  EC2VPCATCH1:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      InternetGatewayId:
+        Ref: EC2IGW1
+      VpcId:
+        Ref: VPC
+  EC2Route1:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      RouteTableId:
+        Ref: EC2RT1
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: EC2IGW1
+  EC2SUBASELBa:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId:
+        Ref: EC2RT1
+      SubnetId:
+        Ref: subnetElb2a
+  EBpyappNJ:
+    Type: 'AWS::ElasticBeanstalk::Application'
+    Properties:
+      ApplicationName: NoteJam
+  versionSampleApplication13:
+    Type: 'AWS::ElasticBeanstalk::ApplicationVersion'
+    Properties:
+      ApplicationName:
+        Ref: EBpyappNJ
+      Description: 'Version 1.0'
+      SourceBundle:
+        S3Bucket:
+          'Fn::Join':
+            - '-'
+            -
+              - elasticbeanstalk-samples
+              -
+                Ref: 'AWS::Region'
+        S3Key: python-sample-20150402.zip
+  EBpyappenv:
+    Type: 'AWS::ElasticBeanstalk::Environment'
+    Properties:
+      ApplicationName:
+        Ref: EBpyappNJ
+      SolutionStackName: '64bit Amazon Linux 2018.03 v2.9.2 running Python 3.6'
+      VersionLabel:
+        Ref: versionSampleApplication13
+      Tier:
+        Name: WebServer
+        Type: Standard
+        Version: ' '
+      OptionSettings:
+        -
+          Namespace: 'aws:autoscaling:launchconfiguration'
+          OptionName: IamInstanceProfile
+          Value: aws-elasticbeanstalk-ec2-role
+        -
+          Namespace: 'aws:autoscaling:launchconfiguration'
+          OptionName: InstanceType
+          Value: t2.medium
+        -
+          Namespace: 'aws:autoscaling:launchconfiguration'
+          OptionName: SecurityGroups
+          Value:
+            Ref: SGnoteJamApp
+        -
+          Namespace: 'aws:autoscaling:trigger'
+          OptionName: UpperThreshold
+          Value: '6000000'
+        -
+          Namespace: 'aws:autoscaling:updatepolicy:rollingupdate'
+          OptionName: MaxBatchSize
+          Value: '1'
+        -
+          Namespace: 'aws:autoscaling:updatepolicy:rollingupdate'
+          OptionName: MinInstancesInService
+          Value: '1'
+        -
+          Namespace: 'aws:autoscaling:updatepolicy:rollingupdate'
+          OptionName: RollingUpdateEnabled
+          Value: 'true'
+        -
+          Namespace: 'aws:autoscaling:updatepolicy:rollingupdate'
+          OptionName: RollingUpdateType
+          Value: Health
+        -
+          Namespace: 'aws:ec2:vpc'
+          OptionName: AssociatePublicIpAddress
+          Value: 'true'
+        -
+          Namespace: 'aws:ec2:vpc'
+          OptionName: ELBSubnets
+          Value:
+            'Fn::Join':
+              - ','
+              -
+                -
+                  Ref: subnetElb2b
+                -
+                  Ref: subnetElb2a
+        -
+          Namespace: 'aws:ec2:vpc'
+          OptionName: Subnets
+          Value:
+            'Fn::Join':
+              - ','
+              -
+                -
+                  Ref: subnetApp2a
+                -
+                  Ref: subnetApp2b
+        -
+          Namespace: 'aws:ec2:vpc'
+          OptionName: VPCId
+          Value:
+            Ref: VPC
+        -
+          Namespace: 'aws:elasticbeanstalk:cloudwatch:logs'
+          OptionName: DeleteOnTerminate
+          Value: 'true'
+        -
+          Namespace: 'aws:elasticbeanstalk:cloudwatch:logs'
+          OptionName: RetentionInDays
+          Value: '3'
+        -
+          Namespace: 'aws:elasticbeanstalk:cloudwatch:logs'
+          OptionName: StreamLogs
+          Value: 'true'
+        -
+          Namespace: 'aws:elasticbeanstalk:container:python'
+          OptionName: StaticFiles
+          Value: /static/=static_files/
+        -
+          Namespace: 'aws:elasticbeanstalk:container:python'
+          OptionName: WSGIPath
+          Value: notejam/wsgi.py
+        -
+          Namespace: 'aws:elasticbeanstalk:container:python:staticfiles'
+          OptionName: /static/
+          Value: static_files/
+        -
+          Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: RDS_HOSTNAME
+          Value:
+            'Fn::GetAtt':
+              - noteJamRDS
+              - Endpoint.Address
+        -
+          Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: RDS_DB_NAME
+          Value:
+            Ref: DBName
+        -
+          Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: RDS_PASSWORD
+          Value:
+            Fn::GetAtt:
+              - InvokeGetPasswordLambda
+              - Data
+        -
+          Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: RDS_USERNAME
+          Value: secretsauce
+        -
+          Namespace: 'aws:elasticbeanstalk:command'
+          OptionName: DeploymentPolicy
+          Value: Rolling
+        -
+          Namespace: 'aws:elasticbeanstalk:environment'
+          OptionName: ServiceRole
+          Value: aws-elasticbeanstalk-service-role
+        -
+          Namespace: 'aws:elasticbeanstalk:healthreporting:system'
+          OptionName: SystemType
+          Value: enhanced
+        -
+          Namespace: 'aws:elb:healthcheck'
+          OptionName: Interval
+          Value: '10'
+        -
+          Namespace: 'aws:elb:loadbalancer'
+          OptionName: CrossZone
+          Value: 'true'
+        -
+          Namespace: 'aws:elb:loadbalancer'
+          OptionName: LoadBalancerHTTPPort
+          Value: '80'
+        -
+          Namespace: 'aws:elb:loadbalancer'
+          OptionName: SecurityGroups
+          Value:
+            Ref: SGnoteJamElb
+        -
+          Namespace: 'aws:elb:policies'
+          OptionName: 'Stickiness Cookie Expiration'
+          Value: '18000'
+        -
+          Namespace: 'aws:elb:policies'
+          OptionName: 'Stickiness Policy'
+          Value: 'true'
+        -
+          Namespace: 'aws:elb:policies'
+          OptionName: ConnectionDrainingEnabled
+          Value: 'true'
+  SGnoteJamApp:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: SG-noteJam-App
+      VpcId:
+        Ref: VPC
+  SGnoteJamElb:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: SG-noteJam-ELB
+      VpcId:
+        Ref: VPC
+  EC2SUBAS1b:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId:
+        Ref: EC2RT1
+      SubnetId:
+        Ref: subnetApp2b
+  EC2SUBASAPPa:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId:
+        Ref: EC2RT1
+      SubnetId:
+        Ref: subnetApp2a
+  csnotejambucket:
+    Properties:
+      BucketName:
+        Ref: notejambucket
+      AccessControl: Private
+      VersioningConfiguration:
+        Status: Enabled
+    Type: 'AWS::S3::Bucket'
+  CodeBuildNoteJam:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: NoteJam_CF
+      Description: 'Nodejam App'
+      ServiceRole:
+        'Fn::GetAtt':
+          - CodeBuildRole
+          - Arn
+      Artifacts:
+        Type: CODEPIPELINE
+        Location: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: 'aws/codebuild/python:3.4.5'
+        Type: LINUX_CONTAINER
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 10
+  CodeBuildRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        -
+          PolicyName: codebuild-service
+          PolicyDocument:
+            Statement:
+              -
+                Effect: Allow
+                Action: '*'
+                Resource: '*'
+            Version: '2012-10-17'
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codepipeline.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: codepipeline-service
+        PolicyDocument:
+          Statement:
+          - Action:
+            - codecommit:GetBranch
+            - codecommit:GetCommit
+            - codecommit:UploadArchive
+            - codecommit:GetUploadArchiveStatus
+            - codecommit:CancelUploadArchive
+            - codebuild:*
+            Resource: "*"
+            Effect: Allow
+          - Action:
+            - s3:GetObject
+            - s3:GetObjectVersion
+            - s3:GetBucketVersioning
+            Resource: "*"
+            Effect: Allow
+          - Action:
+            - s3:PutObject
+            Resource:
+            - arn:aws:s3:::codepipeline*
+            - arn:aws:s3:::elasticbeanstalk*
+            Effect: Allow
+          - Action:
+            - codedeploy:CreateDeployment
+            - codedeploy:GetApplicationRevision
+            - codedeploy:GetDeployment
+            - codedeploy:GetDeploymentConfig
+            - codedeploy:RegisterApplicationRevision
+            Resource: "*"
+            Effect: Allow
+          - Action:
+            - elasticbeanstalk:*
+            - ec2:*
+            - elasticloadbalancing:*
+            - autoscaling:*
+            - cloudwatch:*
+            - s3:*
+            - sns:*
+            - cloudformation:*
+            - rds:*
+            - sqs:*
+            - ecs:*
+            - iam:PassRole
+            Resource: "*"
+            Effect: Allow
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:GetLogEvents
+            - logs:PutLogEvents
+            - logs:DescribeLogGroups
+            - logs:DescribeLogStreams
+            - logs:PutRetentionPolicy
+            Resource: "*"
+            Effect: Allow
+          - Action:
+            - lambda:InvokeFunction
+            - lambda:ListFunctions
+            Resource: "*"
+            Effect: Allow
+          Version: '2012-10-17'
+  CodePipelineStack:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      RoleArn:
+        Fn::Join:
+        - ''
+        - - 'arn:aws:iam::'
+          - Ref: AWS::AccountId
+          - ":role/"
+          - Ref: CodePipelineRole   
+      Stages:
+        -
+          Name: Source
+          Actions:
+            -
+              InputArtifacts: []
+              Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: '1'
+                Provider: CodeCommit
+              Configuration:
+                RepositoryName:
+                  Ref: NoteJamRepoName
+                BranchName:
+                  Ref: NoteJamRepoBranchName
+              OutputArtifacts:
+                -
+                  Name: MyApp
+              RunOrder: 1
+        -
+          Name: Build
+          Actions:
+            -
+              Name: CodeBuild
+              InputArtifacts:
+                -
+                  Name: MyApp
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              Configuration:
+                ProjectName:
+                  Ref: CodeBuildNoteJam
+              OutputArtifacts:
+                -
+                  Name: MyAppBuilt
+              RunOrder: 1
+        -
+          Name: Deploy
+          Actions:
+            -
+              Name: MyAppDeploy
+              InputArtifacts:
+                -
+                  Name: MyAppBuilt
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: '1'
+                Provider: ElasticBeanstalk
+              Configuration:
+                ApplicationName:
+                  Ref: EBpyappNJ
+                EnvironmentName:
+                  Ref: EBpyappenv
+              RunOrder: 1
+      ArtifactStore:
+        Type: S3
+        Location:
+          Ref: csnotejambucket
