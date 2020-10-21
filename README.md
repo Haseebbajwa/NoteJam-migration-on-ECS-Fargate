@@ -1,1 +1,1 @@
-# NoteJam-migration-on-ECS-Fargate
+# NoteJam-migration-on-ElasticBeanstalk
